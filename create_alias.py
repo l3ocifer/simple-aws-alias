@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+"""
+SimpleLogin Alias Creator with AWS Route53 Integration
+
+Dependencies:
+- boto3 (>=1.26.0)
+- requests (>=2.31.0)
+- python-dotenv (>=1.0.0)
+- colorama (>=0.4.6)
+
+Install with: pip install boto3 requests python-dotenv colorama
+"""
+
 import argparse
 import boto3
 import requests

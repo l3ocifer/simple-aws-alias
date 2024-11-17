@@ -289,8 +289,12 @@ def get_domains() -> list:
         domains = [d.strip() for d in os.getenv('DOMAINS').split(',')]
     return domains
 
-def prompt_for_domain() -> str:
-    return input("Please enter the domain name: ").strip()
+def get_mailbox_prefixes() -> list:
+    """Get mailbox prefixes from env var, supports comma-separated list"""
+    prefixes = []
+    if os.getenv('MAILBOX_PREFIX'):
+        prefixes = [p.strip() for p in os.getenv('MAILBOX_PREFIX').split(',')]
+    return prefixes
 
 def wait_for_verification(sl_manager: SimpleLoginAliasManager, domain: str, step: str, max_attempts: int = 10) -> bool:
     import time
@@ -303,6 +307,51 @@ def wait_for_verification(sl_manager: SimpleLoginAliasManager, domain: str, step
         attempts += 1
     print_status(f"Maximum verification attempts reached for {step}", False)
     return False
+
+def setup_domain(domain: str, sl_manager: SimpleLoginAliasManager, aws_manager: AWSRoute53Manager) -> bool:
+    """Handle complete domain setup process"""
+    print_status(f"\nStarting setup for domain: {domain}")
+    
+    # Get verification code
+    print_status("Getting verification code...", True)
+    verification_code = sl_manager.get_verification_code(domain)
+    if not verification_code:
+        return False
+    
+    # Create all required DNS records
+    dns_setup_steps = [
+        ('verification', lambda: aws_manager.create_verification_record(domain, verification_code)),
+        ('MX', lambda: aws_manager.create_mx_records(domain)),
+        ('SPF', lambda: aws_manager.create_spf_record(domain)),
+        ('DKIM', lambda: aws_manager.create_dkim_records(domain)),
+        ('DMARC', lambda: aws_manager.create_dmarc_record(domain))
+    ]
+    
+    for step_name, setup_func in dns_setup_steps:
+        print_status(f"Creating {step_name} record(s)...", True)
+        if not setup_func():
+            print_status(f"Failed to create {step_name} record(s)", False)
+            return False
+        
+        if step_name != 'DMARC':  # DMARC doesn't have verification
+            if not wait_for_verification(sl_manager, domain, step_name.lower()):
+                print_status(f"{step_name} verification failed", False)
+                return False
+    
+    return True
+
+def create_domain_aliases(domain: str, mailbox_prefixes: list, sl_manager: SimpleLoginAliasManager) -> bool:
+    """Create aliases for all mailbox prefixes on the given domain"""
+    success = True
+    for prefix in mailbox_prefixes:
+        print_status(f"Creating alias {prefix}@{domain}...", True)
+        result = sl_manager.create_alias(domain, prefix)
+        if result:
+            print_status(f"Successfully created alias: {result['alias']}", True)
+        else:
+            print_status(f"Failed to create alias for {prefix}@{domain}", False)
+            success = False
+    return success
 
 def main():
     load_dotenv()
@@ -320,92 +369,28 @@ def main():
         print("Error: SimpleLogin API key is required")
         sys.exit(1)
 
-    # Get domain from args, env, or prompt
-    domain = args.domain
-    if not domain:
-        domains = get_domains()
-        if len(domains) == 1:
-            domain = domains[0]
-        elif len(domains) > 1:
-            print("Available domains:")
-            for i, d in enumerate(domains, 1):
-                print(f"{i}. {d}")
-            choice = input("Select domain number (or enter new domain): ")
-            try:
-                domain = domains[int(choice)-1]
-            except (ValueError, IndexError):
-                domain = choice.strip()
-        else:
-            domain = prompt_for_domain()
+    # Get domains and mailbox prefixes
+    domains = get_domains()
+    if not domains:
+        print_status("Error: No domains specified in DOMAINS env var", False)
+        sys.exit(1)
 
-    # Get mailbox prefix from args or env
-    mailbox = args.mailbox or os.getenv('MAILBOX_PREFIX')
-    if not mailbox:
-        print("Error: Mailbox prefix is required (either via --mailbox or MAILBOX_PREFIX in .env)")
+    mailbox_prefixes = get_mailbox_prefixes()
+    if not mailbox_prefixes:
+        print_status("Error: No mailbox prefixes specified in MAILBOX_PREFIX env var", False)
         sys.exit(1)
 
     # Initialize managers
     sl_manager = SimpleLoginAliasManager(api_key)
     aws_manager = AWSRoute53Manager()
     
-    print_status(f"Starting setup for domain: {domain}")
-    
-    # Step 1: Get verification code
-    print_status("Getting verification code...", True)
-    verification_code = sl_manager.get_verification_code(domain)
-    if not verification_code:
-        sys.exit(1)
-    
-    # Step 2: Create verification record
-    print_status("Creating verification record...", True)
-    if not aws_manager.create_verification_record(domain, verification_code):
-        sys.exit(1)
-    
-    if not wait_for_verification(sl_manager, domain, "ownership"):
-        print("Domain ownership verification failed")
-        sys.exit(1)
-    
-    # Step 3: Create MX records
-    print_status("Creating MX records...", True)
-    if not aws_manager.create_mx_records(domain):
-        sys.exit(1)
-    
-    if not wait_for_verification(sl_manager, domain, "mx"):
-        print("MX record verification failed")
-        sys.exit(1)
-    
-    # Step 4: Create SPF record
-    print_status("Creating SPF record...", True)
-    if not aws_manager.create_spf_record(domain):
-        sys.exit(1)
-    
-    if not wait_for_verification(sl_manager, domain, "spf"):
-        print("SPF record verification failed")
-        sys.exit(1)
-    
-    # Step 5: Create DKIM records
-    print_status("Creating DKIM records...", True)
-    if not aws_manager.create_dkim_records(domain):
-        sys.exit(1)
-    
-    if not wait_for_verification(sl_manager, domain, "dkim"):
-        print("DKIM record verification failed")
-        sys.exit(1)
-    
-    # Step 6: Create DMARC record
-    print_status("Creating DMARC record...", True)
-    if not aws_manager.create_dmarc_record(domain):
-        sys.exit(1)
-    
-    # Create alias
-    print_status(f"Creating alias {mailbox}@{domain}...", True)
-    result = sl_manager.create_alias(domain, mailbox)
-    
-    if result:
-        print_status(f"Successfully created alias: {result['alias']}", True)
-    else:
-        print("Failed to create alias")
-        sys.exit(1)
+    # Process each domain
+    for domain in domains:
+        if setup_domain(domain, sl_manager, aws_manager):
+            if not create_domain_aliases(domain, mailbox_prefixes, sl_manager):
+                print_status(f"Some aliases failed for domain {domain}", False)
+        else:
+            print_status(f"Setup failed for domain {domain}", False)
 
 if __name__ == "__main__":
     main() 

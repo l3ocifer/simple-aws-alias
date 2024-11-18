@@ -381,6 +381,17 @@ def main():
     for domain in domains:
         if not setup_domain(domain, sl_manager, aws_manager):
             print_status(f"Setup failed for domain {domain}", False)
+            user_input = input("Continue with next domain? (y/n): ").lower()
+            if user_input != 'y':
+                print_status("Stopping domain setup process", False)
+                break
+        else:
+            print_status(f"\nDomain {domain} setup completed successfully", True)
+            if domain != domains[-1]:  # If not the last domain
+                user_input = input("\nPress Enter to continue with next domain, or 'q' to quit: ").lower()
+                if user_input == 'q':
+                    print_status("Stopping domain setup process", False)
+                    break
 
 if __name__ == "__main__":
     main()

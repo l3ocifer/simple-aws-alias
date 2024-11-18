@@ -14,6 +14,7 @@ import subprocess
 import shutil
 import atexit
 from pathlib import Path
+import time  # Add at top with other imports
 
 # Check for Unix-like environment
 if os.name != 'posix':
@@ -75,6 +76,18 @@ class SimpleLoginAliasManager:
             "Authentication": self.api_key,
             "Content-Type": "application/json"
         }
+        self.rate_limit_delay = 5  # Seconds to wait between requests
+
+    def _handle_rate_limit(self, response):
+        """Handle rate limiting with exponential backoff"""
+        if response.status_code == 429:
+            delay = self.rate_limit_delay
+            print_status(f"Rate limit hit. Waiting {delay} seconds...", False)
+            time.sleep(delay)
+            self.rate_limit_delay *= 2  # Double the delay for next time
+            return True
+        self.rate_limit_delay = 5  # Reset delay if request succeeded
+        return False
 
     def get_domain_id(self, domain: str) -> str:
         """Get domain ID from SimpleLogin"""
@@ -193,6 +206,9 @@ class SimpleLoginAliasManager:
     def create_alias(self, domain: str, prefix: str) -> dict:
         """Create an alias for the given domain and prefix"""
         try:
+            # Add delay before making request
+            time.sleep(2)  # Basic rate limiting
+            
             # Check if alias already exists using full list
             target_alias = f"{prefix}@{domain}"
             existing_aliases = self.get_all_aliases()
@@ -242,6 +258,9 @@ class SimpleLoginAliasManager:
                 }
             )
             
+            if self._handle_rate_limit(response):
+                return self.create_alias(domain, prefix)  # Retry after delay
+            
             if response.status_code == 201:
                 return response.json()
             else:
@@ -272,11 +291,16 @@ def create_domain_aliases(domain: str, mailbox_prefixes: list, sl_manager: Simpl
     for prefix in mailbox_prefixes:
         print_status(f"Creating alias {prefix}@{domain}...", True)
         result = sl_manager.create_alias(domain, prefix)
-        if result:
-            print_status(f"Successfully created alias: {result['alias']}", True)
+        
+        if isinstance(result, dict):
+            if 'email' in result:
+                print_status(f"Successfully created alias: {result['email']}", True)
+            elif result:
+                print_status(f"Alias already exists", True)
         else:
             print_status(f"Failed to create alias for {prefix}@{domain}", False)
             success = False
+            break
     return success
 
 def main():
